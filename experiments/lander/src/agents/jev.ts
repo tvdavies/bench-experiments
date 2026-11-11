@@ -78,26 +78,139 @@ function expectedValue(answer: ChoiceAnswer | undefined, opts: Record<string, { 
   return mass > 0.5 ? total / mass : null;
 }
 
+/**
+ * Interfaces:
+ * - `throttle` (v1): the chat briefing as prose, asking Jev to pick absolute
+ *   throttle and lateral levels. Probing showed Jev reads the instruments
+ *   correctly but has a strong "more thrust is safer" bias whenever it is asked
+ *   an action question, even while climbing.
+ * - `assess` (v2): structured instrument readings, and the vertical question is
+ *   framed as an assessment ("descending too fast / about right / climbing").
+ *   Each answer maps to a throttle relative to hover, so the adapter supplies
+ *   the hover-throttle physics that every model is told in its briefing.
+ */
+export type JevInterface = "throttle" | "assess";
+
+function assessOptions(hover: number): Record<string, { value: number; text: string }> {
+  return {
+    far_too_fast: { value: 1, text: "Descending far too fast for this altitude; needs hard braking." },
+    too_fast: { value: hover + (1 - hover) * 0.5, text: "Descending somewhat too fast for this altitude; needs more braking." },
+    about_right: { value: hover, text: "Descent rate is about right for this altitude; hold it steady." },
+    too_slow: { value: hover * 0.5, text: "Descending too slowly; at this rate the fuel runs out before touchdown, so it needs less upward thrust." },
+    climbing: { value: 0, text: "Climbing, or about to; needs much less upward thrust." },
+  };
+}
+
+const PUSH_OPTIONS: Record<string, { value: number; text: string }> = {
+  push_left: { value: -1, text: "Push the lander left (towards negative dx)." },
+  none: { value: 0, text: "No sideways thrust." },
+  push_right: { value: 1, text: "Push the lander right (towards positive dx)." },
+};
+
+export function instrumentState(ctx: DecisionContext) {
+  const o = ctx.obs;
+  const s = ctx.spec;
+  return {
+    task: "Land the lander softly on the pad.",
+    vehicle: {
+      gravity_mps2: s.gravity,
+      main_engine_max_up_accel_mps2: s.mainAccelMax,
+      hover_throttle: Math.round((s.gravity / s.mainAccelMax) * 100) / 100,
+      lateral_max_accel_mps2: s.lateralAccelMax,
+      fuel_capacity: s.fuelCapacity,
+      pad_half_width_m: s.padHalfWidth,
+      safe_touchdown: { max_abs_vertical_speed_mps: 2, max_abs_horizontal_speed_mps: 1 },
+    },
+    instruments: {
+      time_s: o.t,
+      altitude_m: o.altitude,
+      vertical_speed_mps: o.vy,
+      vertical_motion: o.vy > 0.3 ? "climbing" : o.vy < -0.3 ? "descending" : "steady",
+      horizontal_offset_from_pad_m: o.dx,
+      side_of_pad: o.dx < -s.padHalfWidth ? "left of pad" : o.dx > s.padHalfWidth ? "right of pad" : "over pad",
+      horizontal_speed_mps: o.vx,
+      horizontal_motion: o.vx < -0.3 ? "moving left" : o.vx > 0.3 ? "moving right" : "steady",
+      fuel_remaining: o.fuel,
+      wind_accel_estimate_mps2: o.windEstimate,
+      // Derived readings, as a real lander's display would show them.
+      time_to_touchdown_at_current_rate_s: o.vy < -0.1 ? Math.round(o.altitude / -o.vy) : null,
+      fuel_endurance_at_hover_s: Math.round(o.fuel / Math.max(0.05, s.gravity / s.mainAccelMax)),
+    },
+    current_command: { main_throttle: o.command.main, lateral: o.command.lateral },
+    recent: ctx.recent.slice(-5).map((r) => ({
+      time_s: r.obs.t,
+      altitude_m: r.obs.altitude,
+      vertical_speed_mps: r.obs.vy,
+      horizontal_offset_from_pad_m: r.obs.dx,
+      horizontal_speed_mps: r.obs.vx,
+      main_throttle: r.command.main,
+      lateral: r.command.lateral,
+    })),
+    ...(ctx.clock.mode !== "paused" && {
+      timing: "The world keeps moving while you decide; your previous command stays active until your answer arrives.",
+    }),
+  };
+}
+
+function chosenValue(answer: ChoiceAnswer | undefined, opts: Record<string, { value: number }>): number | null {
+  if (!answer || answer.type !== "choice") return null;
+  return opts[answer.choice]?.value ?? null;
+}
+
 export class JevAgent implements Agent {
   readonly name: string;
   readonly consumesTime = true;
 
   constructor(
     private readonly model: string,
+    private readonly iface: JevInterface = "throttle",
     private readonly apiKey = process.env.JEV_API_KEY,
     private readonly timeoutMs = 60_000,
   ) {
     if (!apiKey) throw new Error("JEV_API_KEY is required for Jev models");
-    this.name = model;
+    this.name = iface === "throttle" ? model : `${model}+${iface}`;
+  }
+
+  private request(ctx: DecisionContext) {
+    if (this.iface === "throttle") {
+      return {
+        state: {
+          briefing: systemPrompt(ctx.spec, ctx.clock).replace(/\n\nPREDICTIONS[\s\S]*$/, ""),
+          telemetry: telemetryMessage(ctx),
+        },
+        questions: QUESTIONS,
+        mainOptions: MAIN_OPTIONS,
+        lateralOptions: LATERAL_OPTIONS,
+      };
+    }
+    const mainOptions = assessOptions(ctx.spec.gravity / ctx.spec.mainAccelMax);
+    return {
+      state: instrumentState(ctx),
+      questions: {
+        main: {
+          type: "choice",
+          instructions:
+            "Given the lander's altitude, vertical speed and remaining fuel endurance, how does its descent compare with what a soft landing on the pad needs right now? It must reach the ground before the fuel runs out, but slowly enough to brake in time.",
+          criteria: criteria(mainOptions),
+        },
+        lateral: {
+          type: "choice",
+          instructions:
+            "Which way should the lateral thrusters push now to bring the lander over the pad and stop its sideways motion, allowing for the wind?",
+          criteria: criteria(PUSH_OPTIONS),
+        },
+      },
+      mainOptions,
+      lateralOptions: PUSH_OPTIONS,
+    };
   }
 
   async decide(ctx: DecisionContext): Promise<Decision> {
     const hold = { ...ctx.obs.command };
-    const state = {
-      briefing: systemPrompt(ctx.spec, ctx.clock).replace(/\n\nPREDICTIONS[\s\S]*$/, ""),
-      telemetry: telemetryMessage(ctx),
-    };
-    const body = JSON.stringify({ model: this.model, state, questions: QUESTIONS });
+    const req = this.request(ctx);
+    const MAIN_OPTIONS = req.mainOptions;
+    const LATERAL_OPTIONS = req.lateralOptions;
+    const body = JSON.stringify({ model: this.model, state: req.state, questions: req.questions });
 
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -127,7 +240,11 @@ export class JevAgent implements Agent {
           outputTokens: json.usage?.output_tokens ?? 0,
           reasoningTokens: 0,
         };
-        const main = expectedValue(json.answers?.main, MAIN_OPTIONS);
+        // v1 averages the distribution. The assessment interface uses Jev's own choice for the
+        // vertical axis: its answers there are often two-humped ("too slow" vs "too fast"), and
+        // averaging those lands on hover, so the command never moves even when Jev says "descend".
+        const main =
+          this.iface === "assess" ? chosenValue(json.answers?.main, MAIN_OPTIONS) : expectedValue(json.answers?.main, MAIN_OPTIONS);
         const lateral = expectedValue(json.answers?.lateral, LATERAL_OPTIONS);
         if (main === null || lateral === null) {
           return { control: hold, valid: false, parseError: "malformed choice answers", usage, latencyMs };
