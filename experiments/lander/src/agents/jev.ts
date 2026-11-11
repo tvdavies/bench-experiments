@@ -24,7 +24,7 @@ const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 
 export type JevInterface = "protocol" | "assess";
 
-type Options = Record<string, { value: number; text: string }>;
+export type Options = Record<string, { value: number; text: string }>;
 
 /** Protocol menus as Jev choice options. Keys are ids; the text is just the value. */
 const menu = (prefix: string, levels: readonly number[]): Options =>
@@ -34,14 +34,14 @@ export const PROTOCOL_LATERAL = menu("lateral", LATERAL_LEVELS);
 
 const criteria = (opts: Options) => Object.fromEntries(Object.entries(opts).map(([k, v]) => [k, v.text]));
 
-interface ChoiceAnswer {
+export interface ChoiceAnswer {
   type: "choice";
   choice: string;
   confidence: number;
   probabilities: Record<string, number>;
 }
 
-interface JevResponse {
+export interface JevResponse {
   model?: string;
   answers?: Record<string, ChoiceAnswer>;
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -180,58 +180,69 @@ export class JevAgent implements Agent {
   async decide(ctx: DecisionContext): Promise<Decision> {
     const hold = { ...ctx.obs.command };
     const req = this.request(ctx);
-    const body = JSON.stringify({ model: this.model, state: req.state, questions: req.questions });
-
-    let lastError = "unknown error";
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const started = performance.now();
-      try {
-        const res = await fetch(ENDPOINT, {
-          method: "POST",
-          headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
-          body,
-          redirect: "error",
-          signal: AbortSignal.timeout(this.timeoutMs),
-        });
-        const latencyMs = performance.now() - started;
-        const text = await res.text();
-        if (!res.ok) {
-          // Never echo the body: it may reflect request content.
-          lastError = `HTTP ${res.status}`;
-          if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-            await Bun.sleep(1000 * 2 ** (attempt - 1));
-            continue;
-          }
-          break;
-        }
-        const json = JSON.parse(text) as JevResponse;
-        const usage: Usage = {
-          inputTokens: json.usage?.input_tokens ?? 0,
-          outputTokens: json.usage?.output_tokens ?? 0,
-          reasoningTokens: 0,
-        };
-        // The command is the option Jev chooses, like any other pilot. (The side experiment
-        // keeps a probability-weighted lateral, as it was run.)
-        const main = chosenValue(json.answers?.main, req.mainOptions);
-        const lateral =
-          this.iface === "protocol" ? chosenValue(json.answers?.lateral, req.lateralOptions) : expectedValue(json.answers?.lateral, req.lateralOptions);
-        if (main === null || lateral === null) {
-          return { control: hold, valid: false, parseError: "malformed choice answers", usage, latencyMs };
-        }
-        const label = (a: ChoiceAnswer | undefined, opts: Options) =>
-          a ? `${this.iface === "protocol" ? opts[a.choice]?.text : a.choice} (${Math.round(a.confidence * 100)}%)` : "?";
-        return {
-          control: { main, lateral },
-          valid: true,
-          note: `main ${label(json.answers?.main, req.mainOptions)}, lateral ${label(json.answers?.lateral, req.lateralOptions)}`,
-          usage,
-          latencyMs,
-        };
-      } catch (err) {
-        lastError = err instanceof Error ? err.name : String(err);
-        if (attempt < 3) await Bun.sleep(1000 * 2 ** (attempt - 1));
-      }
+    const res = await callJev(this.model, this.apiKey as string, req.state, req.questions, this.timeoutMs);
+    if ("error" in res) return { control: hold, valid: false, infraError: res.error };
+    const { json, usage, latencyMs } = res;
+    // The command is the option Jev chooses, like any other pilot. (The side experiment
+    // keeps a probability-weighted lateral, as it was run.)
+    const main = chosenValue(json.answers?.main, req.mainOptions);
+    const lateral =
+      this.iface === "protocol" ? chosenValue(json.answers?.lateral, req.lateralOptions) : expectedValue(json.answers?.lateral, req.lateralOptions);
+    if (main === null || lateral === null) {
+      return { control: hold, valid: false, parseError: "malformed choice answers", usage, latencyMs };
     }
-    return { control: hold, valid: false, infraError: lastError };
+    const label = (a: ChoiceAnswer | undefined, opts: Options) =>
+      a ? `${this.iface === "protocol" ? opts[a.choice]?.text : a.choice} (${Math.round(a.confidence * 100)}%)` : "?";
+    return {
+      control: { main, lateral },
+      valid: true,
+      note: `main ${label(json.answers?.main, req.mainOptions)}, lateral ${label(json.answers?.lateral, req.lateralOptions)}`,
+      usage,
+      latencyMs,
+    };
   }
+}
+
+/** One systemone call with retries on 429/5xx. Never echoes response bodies in errors. */
+export async function callJev(
+  model: string,
+  apiKey: string,
+  state: unknown,
+  questions: unknown,
+  timeoutMs = 60_000,
+): Promise<{ json: JevResponse; usage: Usage; latencyMs: number } | { error: string }> {
+  const body = JSON.stringify({ model, state, questions });
+  let lastError = "unknown error";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const started = performance.now();
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body,
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const latencyMs = performance.now() - started;
+      const text = await res.text();
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+        if ((res.status === 429 || res.status >= 500) && attempt < 3) {
+          await Bun.sleep(1000 * 2 ** (attempt - 1));
+          continue;
+        }
+        break;
+      }
+      const json = JSON.parse(text) as JevResponse;
+      return {
+        json,
+        latencyMs,
+        usage: { inputTokens: json.usage?.input_tokens ?? 0, outputTokens: json.usage?.output_tokens ?? 0, reasoningTokens: 0 },
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.name : String(err);
+      if (attempt < 3) await Bun.sleep(1000 * 2 ** (attempt - 1));
+    }
+  }
+  return { error: lastError };
 }
