@@ -8,6 +8,7 @@
 import { parseArgs } from "node:util";
 import { JsonlWriter, makeRunId, parseSeeds, pool, resolveModelConfig, resultsDir, round, splitList, writeJson } from "@bench/core";
 import { ControllerAgent, NoopAgent } from "./agents/baselines.ts";
+import { JevAgent } from "./agents/jev.ts";
 import { LlmAgent } from "./agents/llm.ts";
 import { type EpisodeResult, runEpisode } from "./episode.ts";
 import { SCENARIO_SETS, type ScenarioSet, isScenarioSet, makeScenario } from "./scenario.ts";
@@ -74,6 +75,12 @@ for (const id of splitList(values.baseline)) {
   factories.push({ name: make().name, consumesTime: false, make });
 }
 for (const model of splitList(values.model)) {
+  if (model.startsWith("jev-")) {
+    // Typesafe's structured-question API, not chat completions. See agents/jev.ts.
+    const make = () => new JevAgent(model);
+    factories.push({ name: model, consumesTime: true, make });
+    continue;
+  }
   const config = resolveModelConfig({
     model,
     maxTokens: Number(values["max-tokens"]),

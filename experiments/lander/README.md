@@ -62,6 +62,7 @@ cautiously isn't a free fix either: it burns the fuel budget.
 | claude-sonnet-5-5 | **81.3** (3/3 landed) | 0.0 (0/3) | ~700–900 | Live: each decision costs 5–10 s, so corrections arrive late. It overshoots the pad by about 340 m, burns its fuel correcting, and falls. |
 | claude-haiku-5-5 | 70.3 (2/3; the third touched down at vx 1.38) | 0.0 (0/3) | ~3,200–3,500 | Live: the first decision alone takes about 27 s, which is the whole flight. |
 | gpt-5.6-luna | 0.0 (0/3) | 0.0 (0/3) | ~420 | Over-cautious even when paused: brakes to a hover high up, creeps down at 1–3 m/s, runs dry at 52–66 s and falls. |
+| jev-1.13.0 | 0.0 (0/3) | 0.0 (0/3); wall 0.0 (0/3) | 131 (fixed), ~150 ms | Fast, but its vertical control is backwards. Lateral commands track drift sensibly (corr with vx ≈ −0.83), but main throttle averages 0.65–0.68, above the 0.5 hover, and rises slightly as it climbs. It ascends to 800–3,500 m, runs dry at about 50 s and falls. |
 
 Three seeds is an anecdote, not a result. The point is that the experiment
 separates *can fly* (paused) from *can fly in time* (tokens), and the replay
@@ -93,6 +94,7 @@ every 0.25 s.
 
 - **Replay:** `bun run lander:report` builds `results/lander/report.html`. It animates any flight against another on the same scenario, with a timeline of thinking versus acting, the model's notes, and predicted versus actual state.
 - **Context:** each decision is stateless. The model gets the system prompt plus the last 10 telemetry rows and its commands. That keeps cost bounded and avoids provider-specific tool-call history formats.
+- **Jev:** model ids starting `jev-` go to Typesafe's `/v1/systemone` API using `JEV_API_KEY`, not to the chat endpoint. Jev answers only probabilistic questions, so each decision asks two `choice` questions (main throttle in 0.25 steps, lateral in 0.5 steps) and commands the probability-weighted mean. It makes no 5 s predictions. Only synthetic telemetry is sent.
 - **Model calls:** commands come via a `control` tool call, falling back to a JSON object in the text. `tool_choice` is `auto`, because forcing a tool disables extended thinking on some providers.
 - **Severity:** with 10 ms/token, verbose models can lose a flight on a single decision. That is the point, but use `--ms-per-token` to explore the curve rather than a single setting.
 - **Token counts:** the token clock relies on the endpoint reporting `completion_tokens`, including reasoning. Check that your gateway does for each provider.
