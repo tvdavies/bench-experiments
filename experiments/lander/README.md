@@ -2,27 +2,54 @@
 
 A 2D lander must touch down softly on a pad in gusty wind with limited fuel.
 The twist versus ordinary game benchmarks: **thinking costs sim time**. While
-the model reasons, its previous command keeps running.
+the pilot reasons, its previous command keeps running.
 
 ## What it measures
 
 | Signal | How |
 | --- | --- |
 | Closed-loop control | Score across seeded scenarios, compared with scripted baselines |
-| **Thinking tax** | The same model and seeds under the `paused` clock versus the `tokens` clock. The gap is what deliberation costs when the world doesn't wait. |
-| Adapting verbosity | Does the model shorten its reasoning once it's told each decision took 6 s? (`tok/decision`, `thinking %`) |
-| Noticing silent change | The `twist` set cuts main-engine thrust to 75% partway down, without telling the model. Compare vertical-speed prediction error before and after. |
-| World-model accuracy | Every command carries a prediction of altitude and vy 5 s ahead, scored against the true trajectory |
+| **Thinking tax** | The same pilot and seeds under the `paused` clock versus the `tokens` clock. The gap is what deliberation costs when the world doesn't wait. |
+| Adapting verbosity | Does the pilot shorten its reasoning once it sees each decision took 6 s? (`tokens / decision`, `time thinking`) |
+| Noticing silent change | The `twist` set cuts main-engine thrust to 75% partway down, without telling anyone. Compare the `standard` and `twist` scores for the same seeds. |
+
+## The protocol: same information, controls and wording for every pilot
+
+Defined once in [`src/protocol.ts`](src/protocol.ts) and enforced by tests.
+
+- **Information:** every pilot receives the identical JSON observation: task, rules (success criteria, time limit, scoring, the clock rule), coordinate conventions, vehicle spec, the controls, the current instrument readings (time, altitude, offset from the pad, horizontal and vertical speed, fuel, wind estimate), the current command, the previous decision's cost on live clocks, and the last 10 readings with the commands issued. No derived readings.
+- **Controls:** every pilot chooses from the same menus: main throttle `0, 0.1 … 1.0` and lateral `-1, -0.75 … 1`. The episode loop snaps every command onto these menus, so no adapter can give a pilot finer control. Baselines included.
+- **Wording:** the two questions, "Choose the main engine throttle to command now." and "Choose the lateral thrust to command now.", are written once and used verbatim by every transport.
+- **Nothing extra:** no side questions (such as predictions) in the scored run, because on the live clock they would cost some pilots time that others don't pay.
+- **Transports:** chat models get the observation as the user message (JSON) and answer through a `control` tool whose parameters are enums of the menus. The system prompt only explains that contract. Jev gets the same observation as `state` and the same questions as `choice` questions over the same menus. The command is the option chosen.
+
+Tests in `test/lander.test.ts` check that chat models and Jev receive the
+identical observation, the same question text and the same menus, and that
+every recorded command is on the grid.
+
+### Side experiment: Jev with assessment framing
+
+`jev-1.13.0+assess` deliberately breaks the protocol, so it is shown
+separately and never ranked. Probing Jev on hand-built states showed it reads
+the instruments correctly (it knows when it's climbing) and gets lateral
+direction right, but any *action* question about the main engine gets a
+strong "more thrust" bias, even while climbing at 8 m/s. The side variant
+gives Jev extra derived readings (time to touchdown, fuel endurance at hover)
+and asks "is the descent too fast / about right / too slow?", mapped to
+throttle relative to hover. It steers much better, but it judges a slow
+descent "about right" while fuel is plentiful and only reacts once fuel is
+already low, so it runs dry. It's a demonstration of how framing changes Jev,
+not a comparable result.
 
 ## The sim
 
 - Point mass, no rotation. Main engine gives up to `2g` upward; lateral thrusters give ±1.5 m/s².
 - Gravity is 1.6–3.7 m/s². Start altitude is 350–550 m and start offset ±40–160 m, descending at 5–15 m/s.
-- Wind is an Ornstein-Uhlenbeck process plus random gusts. `wind_estimate` is a noisy reading.
+- Wind is an Ornstein-Uhlenbeck process plus random gusts. The wind estimate is a noisy reading.
 - Fuel: 45 units, burning `main + 0.5·|lateral|` per second. Hovering costs 0.5 per second, so a slow, cautious descent runs out.
 - Safe landing: `|vy| ≤ 2`, `|vx| ≤ 1`, `|dx| ≤ 15`. Time limit 240 s. Physics step 50 ms.
-- The model takes over from an autopilot holding hover throttle.
-- Wind depends only on seed and sim time, so every agent on a seed faces identical air. The `calm`, `standard` and `twist` sets share start states per seed.
+- The pilot takes over from an autopilot holding hover throttle.
+- Wind depends only on seed and sim time, so every pilot on a seed faces identical air. The `calm`, `standard` and `twist` sets share start states per seed.
 
 ## Clocks
 
@@ -32,42 +59,29 @@ the model reasons, its previous command keeps running.
 | `tokens` | `output_tokens × ms_per_token` (default 10 ms ≈ 100 tok/s), hidden reasoning included. Provider-neutral. |
 | `wall` | Real request latency × `wall_scale`. Realistic, but includes network and gateway queueing. |
 
-After the delay, the new command is held for `--hold` seconds (default 1) before
-the next telemetry. The model is told the rule in its system prompt and sees
-how long its last decision took. It is never told to be brief.
+After the delay, the new command is held for `--hold` seconds (default 1)
+before the next readings. The rule is part of the observation, as is the
+previous decision's cost. No pilot is told to be brief.
 
 ## Scoring (0–100)
 
 - **Safe landing on the pad:** 70 + up to 15 for fuel left + up to 15 for centring.
 - **Other touchdowns:** `50·exp(−severity)`, where severity sums how far `vy`, `vx` and `dx` exceeded the limits. A slightly hard landing beats a lawn dart.
 - **Timeout:** 0.
+- **Unusable answers** (no parseable choice) count against the pilot; the previous command is held.
 - **Infrastructure failures** (four consecutive endpoint errors) abort the episode. It's reported separately and excluded from scores.
 
-## Baselines (20 seeds)
+## Baselines (protocol menus, seeds 1–5)
 
 | Agent | calm | standard | twist |
 | --- | --- | --- | --- |
-| `baseline:p` (trusts the spec sheet) | 88.2 (20/20) | 87.3 (20/20) | 24.1 (0/20) |
-| `baseline:pi` (integral term adapts) | 88.0 (20/20) | 86.9 (20/20) | 54.5 (11/20) |
+| `baseline:p` (trusts the spec sheet) | 87.9 (5/5) | 87.0 (5/5) | 25.8 (0/5) |
+| `baseline:pi` (integral term adapts) | 87.6 (5/5) | 86.4 (5/5) | 59.9 (3/5) |
 | `baseline:noop` | 0 | 0 | 0 |
 
 The twist was tuned so that a controller that doesn't adapt almost always
 crashes, while an adaptive one survives about half the time. Descending more
 cautiously isn't a free fix either: it burns the fuel budget.
-
-## First look (2026-11-11, `standard` set, seeds 1–3, 10 ms/token)
-
-| Model | Paused | Tokens clock | Tokens per decision | Failure mode |
-| --- | --- | --- | --- | --- |
-| claude-sonnet-5-5 | **81.3** (3/3 landed) | 0.0 (0/3) | ~700–900 | Live: each decision costs 5–10 s, so corrections arrive late. It overshoots the pad by about 340 m, burns its fuel correcting, and falls. |
-| claude-haiku-5-5 | 70.3 (2/3; the third touched down at vx 1.38) | 0.0 (0/3) | ~3,200–3,500 | Live: the first decision alone takes about 27 s, which is the whole flight. |
-| gpt-5.6-luna | 0.0 (0/3) | 0.0 (0/3) | ~420 | Over-cautious even when paused: brakes to a hover high up, creeps down at 1–3 m/s, runs dry at 52–66 s and falls. |
-| jev-1.13.0 | 0.0 (0/3) | 0.0 (0/3); wall 0.0 (0/3) | 131 (fixed), ~150 ms | Fast, but its vertical control is backwards. Lateral commands track drift sensibly (corr with vx ≈ −0.83), but main throttle averages 0.65–0.68, above the 0.5 hover, and rises slightly as it climbs. It ascends to 800–3,500 m, runs dry at about 50 s and falls. |
-
-Three seeds is an anecdote, not a result. The point is that the experiment
-separates *can fly* (paused) from *can fly in time* (tokens), and the replay
-shows which failure is which. Next steps: more seeds, a sweep over
-`--ms-per-token`, the `twist` set, and reasoning models at several effort levels.
 
 ## Running
 
@@ -76,17 +90,17 @@ shows which failure is which. Next steps: more seeds, a sweep over
 bun run lander --baseline p,pi,noop --set calm,standard,twist --seeds 1-20
 
 # Models: paused vs live clock on the same seeds
-bun run lander --model claude-haiku-5-5,gpt-5.6-luna --clock paused,tokens --set standard --seeds 1-5
+bun run lander --model claude-haiku-5-5,gpt-6.1-sol --clock paused,tokens --set standard,twist --seeds 1-5 --label v2-mine
 
-# Reasoning effort, gentler token clock, the twist set
-bun run lander --model gpt-6.1-sol --reasoning-effort low --clock tokens --ms-per-token 4 --set twist --seeds 1-5
+# Jev (Typesafe systemone API, needs JEV_API_KEY); +assess is the side experiment
+bun run lander --model jev-1.13.0,jev-1.13.0+assess --clock paused,tokens --seeds 1-5
 
-# HTML report across all runs (latest result wins per agent/clock/scenario)
-bun run lander:report
-
-# Standalone results site from run folders labelled v1 (one self-contained index.html)
+# Standalone results site from run folders labelled v2 (one self-contained index.html)
 bun run lander:site            # -> results/lander/site/public/index.html
-bun run lander:site --match v2 # a different run label
+bun run lander:site --match v3 # a different run label
+
+# Older single-page report across all runs
+bun run lander:report
 ```
 
 The site (`site/index.html`, `site/styles.css`, `site/app.js`, built by
@@ -98,17 +112,12 @@ static `public/` folder, so it deploys as-is to myslop apps or any static host.
 
 Output goes to `results/lander/<runId>/`. That folder holds `config.json`,
 `summary.json`, and `episodes.jsonl` with full traces: every observation,
-command, prediction, token count and delay, plus the true trajectory sampled
-every 0.25 s.
+command, token count and delay, plus the true trajectory sampled every 0.25 s.
 
 ## Notes and known limits
 
-- **Replay:** `bun run lander:report` builds `results/lander/report.html`. It animates any flight against another on the same scenario, with a timeline of thinking versus acting, the model's notes, and predicted versus actual state.
-- **Context:** each decision is stateless. The model gets the system prompt plus the last 10 telemetry rows and its commands. That keeps cost bounded and avoids provider-specific tool-call history formats.
-- **Jev:** model ids starting `jev-` go to Typesafe's `/v1/systemone` API using `JEV_API_KEY`, not to the chat endpoint. Jev answers only probabilistic questions (`noul` yes/no, `choice`), makes no 5 s predictions, and only synthetic telemetry is sent. There are two interfaces:
-  - `jev-1.13.0` (throttle questions): the chat briefing as prose, plus two `choice` questions picking absolute throttle (0.25 steps) and lateral (0.5 steps). The command is the probability-weighted mean.
-  - `jev-1.13.0+assess` (assessment questions): structured instrument readings, including the derived time-to-touchdown and fuel endurance at hover. The vertical question asks whether the descent is far too fast, too fast, about right, too slow or climbing, mapped to throttle relative to hover using Jev's chosen option. Lateral is push left / none / push right.
-  - Probing on hand-built states showed Jev perceives the situation correctly and gets lateral direction right 7/7. Any *action* question about the main engine gets a strong "more thrust" bias, even while climbing at 8 m/s. *Assessment* questions get the right direction, but in flight its judgement of the right descent rate is uncertain and too slow for the fuel budget, so it steers well and then runs dry.
-- **Model calls:** commands come via a `control` tool call, falling back to a JSON object in the text. `tool_choice` is `auto`, because forcing a tool disables extended thinking on some providers.
+- **History:** v1 (before the protocol) gave chat models a prose briefing with continuous controls and a prediction question, and gave Jev an adapted version of it. Results from v1 are not comparable with v2 and aren't on the site.
+- **Context:** each decision is stateless. The observation carries the last 10 readings and commands, which keeps cost bounded and avoids provider-specific tool-call history formats.
+- **Model calls:** `tool_choice` is `auto`, because forcing a tool disables extended thinking on some providers. A JSON object in the text is accepted as a fallback. Visible text is kept for the replay only.
 - **Severity:** with 10 ms/token, verbose models can lose a flight on a single decision. That is the point, but use `--ms-per-token` to explore the curve rather than a single setting.
-- **Token counts:** the token clock relies on the endpoint reporting `completion_tokens`, including reasoning. Check that your gateway does for each provider.
+- **Token counts:** the token clock relies on the endpoint reporting `completion_tokens`, including reasoning. Check that your gateway does for each provider. Jev reports a fixed output count per request.

@@ -77,9 +77,9 @@ for (const id of splitList(values.baseline)) {
 for (const model of splitList(values.model)) {
   if (model.startsWith("jev-")) {
     // Typesafe's structured-question API, not chat completions. See agents/jev.ts.
-    // "jev-1.13.0" uses the throttle interface; "jev-1.13.0+assess" the assessment one.
-    const [apiModel, iface = "throttle"] = model.split("+") as [string, string?];
-    if (iface !== "throttle" && iface !== "assess") throw new Error(`Unknown Jev interface: ${iface}`);
+    // "jev-1.13.0" flies the shared protocol; "jev-1.13.0+assess" is the side experiment.
+    const [apiModel, iface = "protocol"] = model.split("+") as [string, string?];
+    if (iface !== "protocol" && iface !== "assess") throw new Error(`Unknown Jev interface: ${iface}`);
     const make = () => new JevAgent(apiModel, iface);
     factories.push({ name: make().name, consumesTime: true, make });
     continue;

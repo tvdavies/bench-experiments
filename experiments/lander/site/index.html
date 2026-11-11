@@ -139,28 +139,32 @@
       <div class="section-head"><div><h2>Method</h2><p class="sub">Small, deterministic and provider-neutral. Code: <a href="https://github.com/tvdavies/bench-experiments/tree/main/experiments/lander">tvdavies/bench-experiments</a>.</p></div></div>
       <div class="method-grid">
         <article class="card prose">
+          <h3>One protocol for every pilot</h3>
+          <p>Every pilot gets the <b>same information</b>: one JSON observation with the task, rules, vehicle, controls, instrument readings and the last 10 readings. Every pilot answers the <b>same two questions</b>, word for word, and chooses from the <b>same menus</b>: throttle 0 to 1 in 0.1 steps, lateral −1 to 1 in 0.25 steps. This applies to chat models, Jev and the hand-written controllers alike. Chat models get the observation as a message and answer through a tool; Jev gets it as <code>state</code> and answers through choice questions. Nothing else is asked, and automated tests check that every pilot receives the same observation and menus.</p>
+        </article>
+        <article class="card prose">
           <h3>The sim</h3>
-          <p>A 2D point-mass lander. Gravity 1.6–3.7 m/s², a main engine giving up to 2g, lateral thrusters giving ±1.5 m/s², and 45 units of fuel. Wind is a random process with gusts and a noisy wind reading. A safe landing needs |vy| ≤ 2, |vx| ≤ 1 and to be within 15 m of the pad. Every agent on a seed faces the same air.</p>
+          <p>A 2D point-mass lander. Gravity 1.6–3.7 m/s², a main engine giving up to 2g, lateral thrusters giving ±1.5 m/s², and 45 units of fuel. Wind is a random process with gusts and a noisy wind reading. A safe landing needs |vy| ≤ 2, |vx| ≤ 1 and to be within 15 m of the pad. Every pilot on a seed faces the same air.</p>
         </article>
         <article class="card prose">
           <h3>The clocks</h3>
-          <p><b>Paused</b>: the world waits, and each command is held for <span data-fill="hold"></span> s. <b>Live</b>: each output token, reasoning included, costs <span data-fill="msPerToken"></span> ms (about <span data-fill="tokPerSec"></span> tokens per second), and the previous command keeps running meanwhile. Models are told the rule and how long their last decision took. They are never told to be brief.</p>
+          <p><b>Paused</b>: the world waits, and each command is held for <span data-fill="hold"></span> s. <b>Live</b>: each output token, reasoning included, costs <span data-fill="msPerToken"></span> ms (about <span data-fill="tokPerSec"></span> tokens per second), and the previous command keeps running meanwhile. The rule and the previous decision's cost are part of the observation. No pilot is told to be brief.</p>
         </article>
         <article class="card prose">
           <h3>Engine failure</h3>
-          <p>In the engine-failure set the main engine silently drops to 75% thrust partway down. The model isn't told. A controller that trusts the spec sheet crashes almost every time, while an adaptive one survives about half. Descending slowly isn't a free fix either, because the fuel runs out.</p>
+          <p>In the engine-failure set the main engine silently drops to 75% thrust partway down. No pilot is told. A controller that trusts the spec sheet crashes almost every time, while an adaptive one survives about half. Descending slowly isn't a free fix either, because the fuel runs out.</p>
         </article>
         <article class="card prose">
           <h3>Scoring</h3>
-          <p>A safe landing on the pad scores 70, plus up to 15 for fuel left and up to 15 for centring. Any other touchdown scores up to 50, decaying with how far outside the limits it was. A timeout scores 0. Episodes where the model API failed are dropped and not scored.</p>
+          <p>A safe landing on the pad scores 70, plus up to 15 for fuel left and up to 15 for centring. Any other touchdown scores up to 50, decaying with how far outside the limits it was. A timeout scores 0. Episodes where the model API failed are dropped and not scored. Unusable answers count against the pilot, and the previous command is held.</p>
         </article>
         <article class="card prose">
           <h3>Baselines</h3>
-          <p>A 20-line P controller and a PI controller see the same telemetry at the same command rate and decide instantly. <b>Do nothing</b> is the floor. If a model can't beat the PI controller, it isn't flying well.</p>
+          <p>A 20-line P controller and a PI controller see the same readings at the same command rate, decide instantly, and are rounded to the same menus. <b>Do nothing</b> is the floor. If a model can't beat the PI controller, it isn't flying well.</p>
         </article>
         <article class="card prose">
           <h3>Caveats</h3>
-          <p id="caveats">Five seeds per set, so treat small gaps as noise. Models are reached through one gateway with default settings. Jev answers only multiple-choice questions, so it has two entries. <b>Throttle Qs</b> asks for throttle levels directly; Jev reads the instruments correctly but always leans towards more thrust, even while climbing. <b>Assessment Qs</b> gives it structured readings and asks whether the descent is too fast or too slow, and that steers well but hovers too long and runs out of fuel. Fable 5.2 could not be reached through the gateway and is missing.</p>
+          <p id="caveats">Five seeds per set, so treat small gaps as noise. Models are reached through one gateway with default settings. <b>Jev · assessment framing</b> is a side experiment that deliberately breaks the protocol: it gets extra derived readings and is asked "is the descent too fast or too slow?" rather than to choose a throttle. It's shown to illustrate how much framing changes Jev's behaviour, and is not ranked. Fable 5.2 could not be reached through the gateway.</p>
         </article>
       </div>
     </div>

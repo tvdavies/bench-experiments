@@ -1,5 +1,6 @@
 import { mean, round } from "@bench/core";
 import { LanderSim, type Control, type Observation, type Outcome, type Scenario, publicSpec } from "./sim.ts";
+import { quantize } from "./protocol.ts";
 import type { Agent, ClockConfig, Decision, TelemetryRow } from "./types.ts";
 
 export const RECENT_ROWS = 10;
@@ -15,6 +16,8 @@ export interface DecisionRecord {
   delaySeconds: number;
   /** Delay the clock charged; larger than delaySeconds when the flight ended mid-think. */
   requestedDelaySeconds: number;
+  /** Asked for a value off the protocol menus (snapped). */
+  offGrid?: boolean;
   /** The command arrived after touchdown or timeout. */
   tooLate: boolean;
   outputTokens: number;
@@ -31,6 +34,7 @@ export interface DecisionRecord {
 export interface EpisodeMetrics {
   decisions: number;
   invalidDecisions: number;
+  offGridDecisions: number;
   lateDecisions: number;
   meanDelaySeconds: number;
   maxDelaySeconds: number;
@@ -102,15 +106,18 @@ export async function runEpisode(
     const requestedDelaySeconds = round(delayFor(clock, agent, decision));
     const delaySeconds = sim.advance(requestedDelaySeconds);
     const tooLate = sim.done;
+    // Every pilot is held to the same control menus, whatever its adapter returns.
+    const command = quantize(decision.control);
     if (!tooLate) {
-      sim.setControl(decision.control);
+      sim.setControl(command);
       sim.advance(clock.holdSeconds);
     }
 
     const record: DecisionRecord = {
       index: decisions.length,
       obs,
-      control: { ...decision.control },
+      control: command,
+      ...(decision.offGrid && { offGrid: true }),
       valid: decision.valid,
       delaySeconds,
       requestedDelaySeconds,
@@ -194,6 +201,7 @@ function computeMetrics(decisions: DecisionRecord[], outcome: Outcome, wallSecon
   return {
     decisions: decisions.length,
     invalidDecisions: decisions.filter((d) => !d.valid).length,
+    offGridDecisions: decisions.filter((d) => d.offGrid).length,
     lateDecisions: decisions.filter((d) => d.tooLate).length,
     meanDelaySeconds: round(delays.length ? mean(delays) : 0),
     maxDelaySeconds: round(delays.length ? Math.max(...delays) : 0),

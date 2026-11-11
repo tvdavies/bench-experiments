@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { parseSeeds } from "@bench/core";
 import { ControllerAgent, NoopAgent } from "../src/agents/baselines.ts";
-import { parseControl, telemetryMessage } from "../src/agents/llm.ts";
+import { JevAgent, PROTOCOL_LATERAL, PROTOCOL_MAIN } from "../src/agents/jev.ts";
+import { CONTROL_TOOL, parseControl, userMessage } from "../src/agents/llm.ts";
+import { LATERAL_LEVELS, MAIN_LEVELS, QUESTIONS, buildObservation, isOnGrid, quantize } from "../src/protocol.ts";
 import { runEpisode } from "../src/episode.ts";
 import { makeScenario } from "../src/scenario.ts";
 import { LanderSim, publicSpec, scoreTouchdown } from "../src/sim.ts";
@@ -118,19 +120,60 @@ describe("episodes", () => {
   });
 });
 
-describe("llm agent helpers", () => {
-  test("parses tool args or JSON in text", () => {
-    expect(parseControl({ main: 0.5, lateral: 0 }, "")).toEqual({ main: 0.5, lateral: 0 });
-    expect(parseControl(null, 'ok {"main": 0.4, "lateral": -0.2} done')).toEqual({ main: 0.4, lateral: -0.2 });
-    expect(parseControl(null, "no json")).toBeNull();
+describe("protocol: same information, controls and wording for every pilot", () => {
+  const s = makeScenario("standard", 1);
+  const sim = new LanderSim(s);
+  sim.advance(3);
+  const ctx = {
+    spec: publicSpec(s),
+    clock: tokens,
+    obs: sim.observe(),
+    recent: [{ obs: sim.observe(), command: { main: 0.5, lateral: 0 } }],
+    lastDecision: { outputTokens: 300, delaySeconds: 3 },
+  };
+
+  test("chat models and Jev receive the identical observation", () => {
+    const jev = new JevAgent("jev-1.13.0", "protocol", "test-key").request(ctx);
+    expect(JSON.parse(userMessage(ctx))).toEqual(buildObservation(ctx));
+    expect(jev.state).toEqual(buildObservation(ctx));
   });
 
-  test("telemetry mentions thinking cost only on live clocks", () => {
-    const s = makeScenario("standard", 1);
-    const obs = new LanderSim(s).observe();
-    const base = { spec: publicSpec(s), obs, recent: [], lastDecision: { outputTokens: 300, delaySeconds: 3 } };
-    expect(telemetryMessage({ ...base, clock: tokens })).toContain("300 output tokens");
-    expect(telemetryMessage({ ...base, clock: paused })).not.toContain("output tokens");
+  test("chat models and Jev get the same questions and the same menus", () => {
+    const jev = new JevAgent("jev-1.13.0", "protocol", "test-key").request(ctx);
+    const props = (CONTROL_TOOL.parameters as { properties: Record<string, { enum: number[]; description: string }> }).properties;
+    expect(props.main_throttle?.description).toBe(QUESTIONS.main);
+    expect(props.lateral?.description).toBe(QUESTIONS.lateral);
+    expect(jev.questions.main.instructions).toBe(QUESTIONS.main);
+    expect(jev.questions.lateral.instructions).toBe(QUESTIONS.lateral);
+    expect(props.main_throttle?.enum).toEqual(MAIN_LEVELS);
+    expect(props.lateral?.enum).toEqual(LATERAL_LEVELS);
+    expect(Object.values(PROTOCOL_MAIN).map((o) => o.value)).toEqual(MAIN_LEVELS);
+    expect(Object.values(PROTOCOL_LATERAL).map((o) => o.value)).toEqual(LATERAL_LEVELS);
+  });
+
+  test("the observation exposes the protocol menus and questions", () => {
+    const o = buildObservation(ctx);
+    expect(o.controls.main_throttle).toEqual({ question: QUESTIONS.main, options: MAIN_LEVELS });
+    expect(o.controls.lateral).toEqual({ question: QUESTIONS.lateral, options: LATERAL_LEVELS });
+    expect(o.last_decision?.output_tokens).toBe(300);
+    expect(buildObservation({ ...ctx, clock: paused }).last_decision).toBeUndefined();
+  });
+
+  test("quantize snaps onto the menus", () => {
+    expect(quantize({ main: 0.34, lateral: -0.6 })).toEqual({ main: 0.3, lateral: -0.5 });
+    expect(isOnGrid({ main: 0.3, lateral: -0.5 })).toBe(true);
+    expect(isOnGrid({ main: 0.35, lateral: 0 })).toBe(false);
+  });
+
+  test("every recorded command is on the grid, even from a continuous controller", async () => {
+    const r = await runEpisode(makeScenario("standard", 2), new ControllerAgent("pi"), paused);
+    expect(r.decisions.every((d) => isOnGrid(d.control))).toBe(true);
+  });
+
+  test("parses tool args or JSON in text", () => {
+    expect(parseControl({ main_throttle: 0.5, lateral: 0 }, "")).toEqual({ main_throttle: 0.5, lateral: 0 });
+    expect(parseControl(null, 'ok {"main_throttle": 0.4, "lateral": -0.25} done')).toEqual({ main_throttle: 0.4, lateral: -0.25 });
+    expect(parseControl(null, "no json")).toBeNull();
   });
 });
 

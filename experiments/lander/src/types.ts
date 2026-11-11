@@ -49,6 +49,8 @@ export interface Decision {
   latencyMs?: number;
   /** False when the agent's output couldn't be parsed into a command. */
   valid: boolean;
+  /** The agent asked for a value outside the protocol menus; it was snapped to the nearest option. */
+  offGrid?: boolean;
   /** Request failed (network, quota, gateway). Not the agent's fault. */
   infraError?: string;
   parseError?: string;

@@ -1,56 +1,38 @@
 /**
  * Jev (Typesafe "systemone") pilot.
  *
- * Jev is not a chat model. It takes a `state` and a set of typed questions,
- * and answers each one with probabilities: `noul` (P(yes)) or `choice` (a
- * distribution over named criteria). We fly with two choice questions, one
- * for main throttle and one for lateral thrust, and use the probability-weighted
- * mean as the command, so the output is continuous even though the options
- * are discrete.
+ * Jev is not a chat model: it takes a `state` and typed questions and answers
+ * each with probabilities (`noul` = P(yes), `choice` = a distribution over named
+ * options). Only synthetic sim telemetry is sent. Requires JEV_API_KEY.
  *
- * Jev can't answer numeric questions, so it makes no 5 s predictions.
- * Only synthetic sim telemetry is sent. Requires JEV_API_KEY.
+ * Interfaces:
+ * - `protocol` (the scored entry): a pure transport for the shared protocol.
+ *   `state` is the same observation object the chat models receive, the two
+ *   questions are the protocol's questions word for word, the options are the
+ *   protocol's menus, and the command is the option Jev chooses.
+ * - `assess` (side experiment, not comparable): its own structured state with
+ *   extra derived readings, and the vertical question reframed as an assessment
+ *   ("descending too fast / about right / climbing") mapped to throttle relative
+ *   to hover. It breaks the same-information/same-wording rule on purpose, to
+ *   test whether framing changes Jev's behaviour.
  */
-import { clamp } from "@bench/core";
 import type { Usage } from "@bench/core";
+import { LATERAL_LEVELS, MAIN_LEVELS, QUESTIONS, buildObservation } from "../protocol.ts";
 import type { Agent, Decision, DecisionContext } from "../types.ts";
-import { systemPrompt, telemetryMessage } from "./llm.ts";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 
-const MAIN_OPTIONS: Record<string, { value: number; text: string }> = {
-  main_0: { value: 0, text: "Main engine off (0): free fall, no upward thrust." },
-  main_25: { value: 0.25, text: "Main throttle 0.25: weak thrust, still accelerating downward." },
-  main_50: { value: 0.5, text: "Main throttle 0.5: about hover, vertical speed held roughly constant." },
-  main_75: { value: 0.75, text: "Main throttle 0.75: braking, reduces descent speed." },
-  main_100: { value: 1, text: "Main throttle 1.0: full braking, strongest upward acceleration." },
-};
+export type JevInterface = "protocol" | "assess";
 
-const LATERAL_OPTIONS: Record<string, { value: number; text: string }> = {
-  lat_left_full: { value: -1, text: "Lateral -1: full push LEFT (towards negative dx)." },
-  lat_left_half: { value: -0.5, text: "Lateral -0.5: gentle push LEFT." },
-  lat_none: { value: 0, text: "Lateral 0: no sideways thrust." },
-  lat_right_half: { value: 0.5, text: "Lateral +0.5: gentle push RIGHT." },
-  lat_right_full: { value: 1, text: "Lateral +1: full push RIGHT (towards positive dx)." },
-};
+type Options = Record<string, { value: number; text: string }>;
 
-const criteria = (opts: Record<string, { text: string }>) =>
-  Object.fromEntries(Object.entries(opts).map(([k, v]) => [k, v.text]));
+/** Protocol menus as Jev choice options. Keys are ids; the text is just the value. */
+const menu = (prefix: string, levels: readonly number[]): Options =>
+  Object.fromEntries(levels.map((v) => [`${prefix}_${String(v).replace("-", "neg").replace(".", "_")}`, { value: v, text: String(v) }]));
+export const PROTOCOL_MAIN = menu("main", MAIN_LEVELS);
+export const PROTOCOL_LATERAL = menu("lateral", LATERAL_LEVELS);
 
-const QUESTIONS = {
-  main: {
-    type: "choice",
-    instructions:
-      "You are flying the lander described in the state. Which main engine throttle should be commanded now to move towards a safe, on-pad landing without running out of fuel?",
-    criteria: criteria(MAIN_OPTIONS),
-  },
-  lateral: {
-    type: "choice",
-    instructions:
-      "You are flying the lander described in the state. Which lateral thrust should be commanded now to bring dx and vx towards zero, allowing for the wind?",
-    criteria: criteria(LATERAL_OPTIONS),
-  },
-} as const;
+const criteria = (opts: Options) => Object.fromEntries(Object.entries(opts).map(([k, v]) => [k, v.text]));
 
 interface ChoiceAnswer {
   type: "choice";
@@ -65,7 +47,12 @@ interface JevResponse {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
-function expectedValue(answer: ChoiceAnswer | undefined, opts: Record<string, { value: number }>): number | null {
+function chosenValue(answer: ChoiceAnswer | undefined, opts: Options): number | null {
+  if (!answer || answer.type !== "choice") return null;
+  return opts[answer.choice]?.value ?? null;
+}
+
+function expectedValue(answer: ChoiceAnswer | undefined, opts: Options): number | null {
   if (!answer || answer.type !== "choice" || typeof answer.probabilities !== "object") return null;
   let total = 0;
   let mass = 0;
@@ -78,20 +65,9 @@ function expectedValue(answer: ChoiceAnswer | undefined, opts: Record<string, { 
   return mass > 0.5 ? total / mass : null;
 }
 
-/**
- * Interfaces:
- * - `throttle` (v1): the chat briefing as prose, asking Jev to pick absolute
- *   throttle and lateral levels. Probing showed Jev reads the instruments
- *   correctly but has a strong "more thrust is safer" bias whenever it is asked
- *   an action question, even while climbing.
- * - `assess` (v2): structured instrument readings, and the vertical question is
- *   framed as an assessment ("descending too fast / about right / climbing").
- *   Each answer maps to a throttle relative to hover, so the adapter supplies
- *   the hover-throttle physics that every model is told in its briefing.
- */
-export type JevInterface = "throttle" | "assess";
+// ---------- side experiment: assessment framing ----------
 
-function assessOptions(hover: number): Record<string, { value: number; text: string }> {
+function assessOptions(hover: number): Options {
   return {
     far_too_fast: { value: 1, text: "Descending far too fast for this altitude; needs hard braking." },
     too_fast: { value: hover + (1 - hover) * 0.5, text: "Descending somewhat too fast for this altitude; needs more braking." },
@@ -101,7 +77,7 @@ function assessOptions(hover: number): Record<string, { value: number; text: str
   };
 }
 
-const PUSH_OPTIONS: Record<string, { value: number; text: string }> = {
+const PUSH_OPTIONS: Options = {
   push_left: { value: -1, text: "Push the lander left (towards negative dx)." },
   none: { value: 0, text: "No sideways thrust." },
   push_right: { value: 1, text: "Push the lander right (towards positive dx)." },
@@ -132,7 +108,6 @@ export function instrumentState(ctx: DecisionContext) {
       horizontal_motion: o.vx < -0.3 ? "moving left" : o.vx > 0.3 ? "moving right" : "steady",
       fuel_remaining: o.fuel,
       wind_accel_estimate_mps2: o.windEstimate,
-      // Derived readings, as a real lander's display would show them.
       time_to_touchdown_at_current_rate_s: o.vy < -0.1 ? Math.round(o.altitude / -o.vy) : null,
       fuel_endurance_at_hover_s: Math.round(o.fuel / Math.max(0.05, s.gravity / s.mainAccelMax)),
     },
@@ -152,10 +127,7 @@ export function instrumentState(ctx: DecisionContext) {
   };
 }
 
-function chosenValue(answer: ChoiceAnswer | undefined, opts: Record<string, { value: number }>): number | null {
-  if (!answer || answer.type !== "choice") return null;
-  return opts[answer.choice]?.value ?? null;
-}
+// ---------- agent ----------
 
 export class JevAgent implements Agent {
   readonly name: string;
@@ -163,24 +135,24 @@ export class JevAgent implements Agent {
 
   constructor(
     private readonly model: string,
-    private readonly iface: JevInterface = "throttle",
+    private readonly iface: JevInterface = "protocol",
     private readonly apiKey = process.env.JEV_API_KEY,
     private readonly timeoutMs = 60_000,
   ) {
     if (!apiKey) throw new Error("JEV_API_KEY is required for Jev models");
-    this.name = iface === "throttle" ? model : `${model}+${iface}`;
+    this.name = iface === "protocol" ? model : `${model}+${iface}`;
   }
 
-  private request(ctx: DecisionContext) {
-    if (this.iface === "throttle") {
+  request(ctx: DecisionContext) {
+    if (this.iface === "protocol") {
       return {
-        state: {
-          briefing: systemPrompt(ctx.spec, ctx.clock).replace(/\n\nPREDICTIONS[\s\S]*$/, ""),
-          telemetry: telemetryMessage(ctx),
+        state: buildObservation(ctx),
+        questions: {
+          main: { type: "choice", instructions: QUESTIONS.main, criteria: criteria(PROTOCOL_MAIN) },
+          lateral: { type: "choice", instructions: QUESTIONS.lateral, criteria: criteria(PROTOCOL_LATERAL) },
         },
-        questions: QUESTIONS,
-        mainOptions: MAIN_OPTIONS,
-        lateralOptions: LATERAL_OPTIONS,
+        mainOptions: PROTOCOL_MAIN,
+        lateralOptions: PROTOCOL_LATERAL,
       };
     }
     const mainOptions = assessOptions(ctx.spec.gravity / ctx.spec.mainAccelMax);
@@ -208,8 +180,6 @@ export class JevAgent implements Agent {
   async decide(ctx: DecisionContext): Promise<Decision> {
     const hold = { ...ctx.obs.command };
     const req = this.request(ctx);
-    const MAIN_OPTIONS = req.mainOptions;
-    const LATERAL_OPTIONS = req.lateralOptions;
     const body = JSON.stringify({ model: this.model, state: req.state, questions: req.questions });
 
     let lastError = "unknown error";
@@ -240,20 +210,20 @@ export class JevAgent implements Agent {
           outputTokens: json.usage?.output_tokens ?? 0,
           reasoningTokens: 0,
         };
-        // v1 averages the distribution. The assessment interface uses Jev's own choice for the
-        // vertical axis: its answers there are often two-humped ("too slow" vs "too fast"), and
-        // averaging those lands on hover, so the command never moves even when Jev says "descend".
-        const main =
-          this.iface === "assess" ? chosenValue(json.answers?.main, MAIN_OPTIONS) : expectedValue(json.answers?.main, MAIN_OPTIONS);
-        const lateral = expectedValue(json.answers?.lateral, LATERAL_OPTIONS);
+        // The command is the option Jev chooses, like any other pilot. (The side experiment
+        // keeps a probability-weighted lateral, as it was run.)
+        const main = chosenValue(json.answers?.main, req.mainOptions);
+        const lateral =
+          this.iface === "protocol" ? chosenValue(json.answers?.lateral, req.lateralOptions) : expectedValue(json.answers?.lateral, req.lateralOptions);
         if (main === null || lateral === null) {
           return { control: hold, valid: false, parseError: "malformed choice answers", usage, latencyMs };
         }
-        const top = (a: ChoiceAnswer | undefined) => (a ? `${a.choice} (${Math.round(a.confidence * 100)}%)` : "?");
+        const label = (a: ChoiceAnswer | undefined, opts: Options) =>
+          a ? `${this.iface === "protocol" ? opts[a.choice]?.text : a.choice} (${Math.round(a.confidence * 100)}%)` : "?";
         return {
-          control: { main: clamp(main, 0, 1), lateral: clamp(lateral, -1, 1) },
+          control: { main, lateral },
           valid: true,
-          note: `${top(json.answers?.main)}, ${top(json.answers?.lateral)}`,
+          note: `main ${label(json.answers?.main, req.mainOptions)}, lateral ${label(json.answers?.lateral, req.lateralOptions)}`,
           usage,
           latencyMs,
         };

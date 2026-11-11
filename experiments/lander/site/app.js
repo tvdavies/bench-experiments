@@ -33,7 +33,7 @@
     m.shape = SHAPES[m.k % SHAPES.length];
     m.dash = DASHES[m.k % DASHES.length];
   }
-  const llms = M.filter((m) => !m.baseline);
+  const llms = M.filter((m) => !m.baseline && !m.side);
 
   function shapeSvg(m, x, y, r = 5, extra = "") {
     const ring = `stroke="var(--surface)" stroke-width="2" paint-order="stroke"`;
@@ -89,7 +89,8 @@
   const hideTip = () => { tip.hidden = true; };
 
   // ---------- state ----------
-  const S = { set: "standard", fset: "standard", clock: "paused", view: "path", sort: { key: "l", dir: -1 }, hidden: new Set(), hover: null };
+  // Side experiments start hidden in the overlays; click their legend chip to show them.
+  const S = { set: "standard", fset: "standard", clock: "paused", view: "path", sort: { key: "l", dir: -1 }, hidden: new Set(M.filter((m) => m.side).map((m) => m.i)), hover: null };
 
   // Segmented controls
   document.querySelectorAll(".seg[data-control]").forEach((seg) => {
@@ -116,12 +117,12 @@
 
   // ---------- hero ----------
   function renderHero() {
-    const all = rows("all").filter((r) => !r.m.baseline);
+    const all = rows("all").filter((r) => !r.m.baseline && !r.m.side);
     const bestP = [...all].filter((r) => r.p).sort((a, b) => b.p.score - a.p.score)[0];
     const bestL = [...all].filter((r) => r.l).sort((a, b) => b.l.score - a.l.score)[0];
     const worstTax = [...all].filter((r) => r.tax !== null).sort((a, b) => a.tax - b.tax)[0];
     const pi = rows("all").find((r) => r.m.id === "baseline:pi");
-    const flights = F.filter((f) => !f.model.baseline).length;
+    const flights = F.filter((f) => !f.model.baseline && !f.model.side).length;
     const tile = (k, v, d) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
     $("tiles").innerHTML = [
       tile("Models", llms.length, `${flights} model flights over ${D.scenarios.length} scenarios`),
@@ -158,18 +159,24 @@
     const order = (a, b) => S.sort.dir * (sortVal(a, S.sort.key) - sortVal(b, S.sort.key)) || sortVal(b, "p") - sortVal(a, "p");
     const all = rows(S.set);
     // Models are ranked; reference controllers sit below them, unranked.
-    const rs = [...all.filter((r) => !r.m.baseline).sort(order), ...all.filter((r) => r.m.baseline).sort((a, b) => b.p.score - a.p.score)];
+    const rs = [
+      ...all.filter((r) => !r.m.baseline && !r.m.side).sort(order),
+      ...all.filter((r) => r.m.baseline).sort((a, b) => b.p.score - a.p.score),
+      ...all.filter((r) => r.m.side),
+    ];
     const head = `<thead><tr>${COLS.map((c) => `<th class="${c.num ? "num" : ""}" data-key="${c.key}" ${c.key === S.sort.key ? `aria-sort="${S.sort.dir < 0 ? "descending" : "ascending"}"` : ""}>${c.label}</th>`).join("")}</tr></thead>`;
     let rank = 0;
-    let sep = false;
+    let sepBase = false, sepSide = false;
     const body = rs.map((r) => {
       const m = r.m;
-      const divider = m.baseline && !sep ? ((sep = true), `<tr class="divider"><td></td><td colspan="${COLS.length - 1}">Reference controllers: hand-written, decide instantly</td></tr>`) : "";
+      let divider = "";
+      if (m.baseline && !sepBase) { sepBase = true; divider = `<tr class="divider"><td></td><td colspan="${COLS.length - 1}">Reference controllers: hand-written, decide instantly</td></tr>`; }
+      if (m.side && !sepSide) { sepSide = true; divider = `<tr class="divider"><td></td><td colspan="${COLS.length - 1}">Side experiment, not comparable: different information and wording from the protocol (see Method)</td></tr>`; }
       const tax = m.baseline ? `<span class="muted">none</span>` : r.tax === null ? "–" : `<span class="tax ${r.tax < -5 ? "neg" : r.tax > 5 ? "pos" : ""}">${r.tax > 0 ? "+" : r.tax < 0 ? "−" : ""}${fmt(Math.abs(r.tax))}</span>`;
       const tpd = m.baseline ? `<span class="muted">0</span>` : Math.round(r.l?.tpd ?? r.p?.tpd ?? 0).toLocaleString();
       const th = m.baseline ? `<span class="muted">0%</span>` : r.l ? `${Math.round(r.l.th * 100)}%` : "–";
       return `${divider}<tr class="${m.baseline ? "baseline" : ""}" data-m="${m.i}">
-        <td class="rank">${m.baseline ? "" : ++rank}</td>
+        <td class="rank">${m.baseline || m.side ? "" : ++rank}</td>
         <td><div class="model-cell">${legendMark(m)}<div><div class="name">${esc(m.label)}</div><div class="prov">${esc(m.provider)}</div></div></div></td>
         <td>${scoreBar(r.p, m)}</td>
         <td>${m.baseline ? `<div class="scorebar"><span class="val muted">${fmt(r.p?.score)}</span><span class="muted" style="font-size:12.5px">same: decides instantly</span></div>` : scoreBar(r.l, m)}</td>
@@ -189,13 +196,14 @@
     });
     renderScatter(rs);
     renderVerbosity(rs);
-    $("legend-results").innerHTML = legendHtml(rs.map((r) => r.m), false);
+    $("legend-results").innerHTML = legendHtml(rs.map((r) => r.m).filter((m) => !m.side), false);
   }
 
   function legendHtml(models, interactive) {
     let out = "", last = null;
     for (const m of models) {
       if (interactive && m.group !== last) out += `<span class="group-label">${m.group === "other" ? "Other labs" : esc(m.provider)}</span>`;
+      if (m.side) out += `<span class="group-label">Side experiment</span>`;
       last = m.group;
       out += `<span class="item${S.hidden.has(m.i) && interactive ? " off" : ""}" data-m="${m.i}" data-legend="${m.i}">${legendMark(m)}${esc(m.label)}</span>`;
     }
@@ -262,7 +270,7 @@
 
   function renderScatter(rs) {
     // The PI controller is the one useful reference point; the other baselines are clutter here.
-    const pts = rs.filter((r) => r.p && (r.l || r.m.id === "baseline:pi") && (!r.m.baseline || r.m.id === "baseline:pi")).map((r) => {
+    const pts = rs.filter((r) => !r.m.side && r.p && (r.l || r.m.id === "baseline:pi") && (!r.m.baseline || r.m.id === "baseline:pi")).map((r) => {
       const l = r.m.baseline ? r.p : r.l;
       return { m: r.m, xv: r.p.score, yv: l.score, tip: `<b>${esc(r.m.label)}</b><br>Paused ${fmt(r.p.score)} · Live ${fmt(l.score)}<br><span class="tt-sub">${r.m.baseline ? "Decides instantly" : `Thinking tax ${fmt(l.score - r.p.score)}`}</span>` };
     });
@@ -270,7 +278,7 @@
   }
 
   function renderVerbosity(rs) {
-    const pts = rs.filter((r) => !r.m.baseline && r.l && r.l.tpd > 0).map((r) => ({
+    const pts = rs.filter((r) => !r.m.baseline && !r.m.side && r.l && r.l.tpd > 0).map((r) => ({
       m: r.m, xv: clamp(r.l.tpd, 10, 20000), yv: r.l.score,
       tip: `<b>${esc(r.m.label)}</b><br>${Math.round(r.l.tpd).toLocaleString()} tokens / decision<br>≈ ${fmt((r.l.tpd * D.msPerToken) / 1000)} s of flight per decision<br>Live score ${fmt(r.l.score)}`,
     }));
@@ -359,7 +367,7 @@
   };
 
   function defaultPicks(s, preferModel = null) {
-    const all = rows("all").filter((r) => !r.m.baseline);
+    const all = rows("all").filter((r) => !r.m.baseline && !r.m.side);
     const bestP = preferModel ?? [...all].filter((r) => r.p).sort((a, b) => b.p.score - a.p.score)[0]?.m.i;
     const bestL = [...all].filter((r) => r.l && r.m.i !== bestP).sort((a, b) => b.l.score - a.l.score)[0]?.m.i;
     const pi = M.find((m) => m.id === "baseline:pi")?.i;

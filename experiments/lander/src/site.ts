@@ -19,13 +19,14 @@ import type { EpisodeResult } from "./episode.ts";
 const { values } = parseArgs({
   options: {
     runs: { type: "string" },
-    match: { type: "string", default: "v1" },
+    match: { type: "string", default: "v2" },
     out: { type: "string" },
   },
 });
 
 /** Display names and providers. Unknown ids fall back to the raw id. */
-const MODEL_META: Record<string, { label: string; provider: string }> = {
+/** `side: true` = shown separately as a side experiment, never ranked against protocol pilots. */
+const MODEL_META: Record<string, { label: string; provider: string; side?: boolean }> = {
   "claude-opus-5-5": { label: "Opus 5.5", provider: "Anthropic" },
   "claude-sonnet-5-5": { label: "Sonnet 5.5", provider: "Anthropic" },
   "claude-haiku-5-5": { label: "Haiku 5.5", provider: "Anthropic" },
@@ -35,8 +36,8 @@ const MODEL_META: Record<string, { label: string; provider: string }> = {
   "gpt-6.1-terra": { label: "GPT-6.1 Terra", provider: "OpenAI" },
   "gpt-6-luna": { label: "GPT-6 Luna", provider: "OpenAI" },
   "grok-4.7": { label: "Grok 4.7", provider: "xAI" },
-  "jev-1.13.0": { label: "Jev 1.13 · throttle Qs", provider: "Typesafe" },
-  "jev-1.13.0+assess": { label: "Jev 1.13 · assessment Qs", provider: "Typesafe" },
+  "jev-1.13.0": { label: "Jev 1.13", provider: "Typesafe" },
+  "jev-1.13.0+assess": { label: "Jev 1.13 · assessment framing", provider: "Typesafe", side: true },
   "muse-wonder-1.0": { label: "Muse Wonder 1.0", provider: "Meta" },
   "muse-wonder-full-1.0": { label: "Muse Wonder Full 1.0", provider: "Meta" },
   "baseline:pi": { label: "PI controller", provider: "Baseline" },
@@ -50,7 +51,7 @@ const root = resolve(REPO_ROOT, "results", "lander");
 const dirs = values.runs
   ? splitList(values.runs).map((r) => resolve(root, r))
   : readdirSync(root)
-      .filter((d) => d.includes(`-${values.match}-`))
+      .filter((d) => d.includes(`-${values.match}-`) && !d.endsWith("-smoke"))
       .sort()
       .map((d) => resolve(root, d));
 
@@ -89,6 +90,7 @@ const r2 = (n: number) => round(n, 2);
 
 const data = {
   generated: new Date().toISOString(),
+  protocol: "v2",
   msPerToken: episodes.find((e) => e.clock.mode === "tokens")?.clock.msPerToken ?? 10,
   hold: episodes[0]?.clock.holdSeconds ?? 1,
   providers: PROVIDER_ORDER.filter((p) => modelIds.some((m) => (MODEL_META[m]?.provider ?? "Other") === p)),
@@ -97,6 +99,7 @@ const data = {
     label: MODEL_META[id]?.label ?? id,
     provider: MODEL_META[id]?.provider ?? "Other",
     baseline: id.startsWith("baseline:"),
+    side: MODEL_META[id]?.side ?? false,
   })),
   scenarios: scenarioIds.map((id) => {
     const s = scenarioById.get(id)!;
