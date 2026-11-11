@@ -4,7 +4,12 @@ import { quantize } from "./protocol.ts";
 import type { Agent, ClockConfig, Decision, TelemetryRow } from "./types.ts";
 
 export const RECENT_ROWS = 10;
-const MAX_CONSECUTIVE_INFRA_ERRORS = 4;
+/**
+ * Infrastructure failures (rate limits, gateway errors) are never the pilot's fault, so the
+ * world stays frozen and the same decision is retried with backoff. If the endpoint stays
+ * down, the episode is aborted and dropped rather than scored.
+ */
+const INFRA_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 90_000, 120_000];
 const PREDICTION_HORIZON = 5;
 
 export interface DecisionRecord {
@@ -73,6 +78,12 @@ export function delayFor(clock: ClockConfig, agent: Agent, d: Decision): number 
   return ((d.latencyMs ?? 0) / 1000) * clock.wallScale;
 }
 
+let sleep = (ms: number) => Bun.sleep(ms);
+/** Test hook: replace the backoff sleep. */
+export function setSleepForTests(fn: (ms: number) => Promise<void>): void {
+  sleep = fn;
+}
+
 export async function runEpisode(
   scenario: Scenario,
   agent: Agent,
@@ -85,21 +96,20 @@ export async function runEpisode(
   const decisions: DecisionRecord[] = [];
   const started = performance.now();
   let lastDecision: { outputTokens: number; delaySeconds: number } | null = null;
-  let consecutiveInfra = 0;
   let infraError: string | undefined;
 
   while (!sim.done) {
     const obs = sim.observe();
-    const decision = await agent.decide({ spec, clock, obs, recent: [...recent], lastDecision });
-
+    const ctx = { spec, clock, obs, recent: [...recent], lastDecision };
+    let decision = await agent.decide(ctx);
+    for (const wait of INFRA_RETRY_DELAYS_MS) {
+      if (!decision.infraError) break;
+      await sleep(wait);
+      decision = await agent.decide(ctx);
+    }
     if (decision.infraError) {
-      consecutiveInfra++;
-      if (consecutiveInfra >= MAX_CONSECUTIVE_INFRA_ERRORS) {
-        infraError = decision.infraError;
-        break;
-      }
-    } else {
-      consecutiveInfra = 0;
+      infraError = decision.infraError;
+      break;
     }
 
     // The previous command keeps running while the agent thinks.

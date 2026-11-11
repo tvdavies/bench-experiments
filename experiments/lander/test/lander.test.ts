@@ -4,7 +4,7 @@ import { ControllerAgent, NoopAgent } from "../src/agents/baselines.ts";
 import { JevAgent, PROTOCOL_LATERAL, PROTOCOL_MAIN } from "../src/agents/jev.ts";
 import { CONTROL_TOOL, parseControl, userMessage } from "../src/agents/llm.ts";
 import { LATERAL_LEVELS, MAIN_LEVELS, QUESTIONS, buildObservation, isOnGrid, quantize } from "../src/protocol.ts";
-import { runEpisode } from "../src/episode.ts";
+import { runEpisode, setSleepForTests } from "../src/episode.ts";
 import { makeScenario } from "../src/scenario.ts";
 import { LanderSim, publicSpec, scoreTouchdown } from "../src/sim.ts";
 import type { Agent, ClockConfig, Decision } from "../src/types.ts";
@@ -109,7 +109,8 @@ describe("episodes", () => {
     expect(fast).toBeGreaterThan(slow);
   });
 
-  test("infra errors abort the episode instead of scoring it", async () => {
+  test("infra errors freeze the world and retry, then abort instead of scoring", async () => {
+    setSleepForTests(async () => {});
     const broken: Agent = {
       name: "test:broken",
       consumesTime: true,
@@ -117,6 +118,22 @@ describe("episodes", () => {
     };
     const r = await runEpisode(makeScenario("standard", 1), broken, tokens);
     expect(r.infraError).toBe("HTTP 503");
+    expect(r.decisions.length).toBe(0);
+  });
+
+  test("a transient infra error is retried, never recorded against the pilot", async () => {
+    setSleepForTests(async () => {});
+    let calls = 0;
+    const inner = new ControllerAgent("pi");
+    const flaky: Agent = {
+      name: "test:flaky",
+      consumesTime: false,
+      decide: async (ctx) => (++calls % 3 === 0 ? { control: ctx.obs.command, valid: false, infraError: "HTTP 429" } : inner.decide(ctx)),
+    };
+    const r = await runEpisode(makeScenario("calm", 1), flaky, paused);
+    expect(r.infraError).toBeUndefined();
+    expect(r.decisions.some((d) => d.infraError)).toBe(false);
+    expect(r.outcome.kind).toBe("landed");
   });
 });
 

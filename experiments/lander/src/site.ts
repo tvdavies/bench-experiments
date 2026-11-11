@@ -63,7 +63,8 @@ for (const dir of dirs) {
   for (const line of readFileSync(file, "utf8").split("\n")) {
     if (!line.trim()) continue;
     const e = JSON.parse(line) as EpisodeResult;
-    if (e.infraError) {
+    // Never score a flight where a request failed: the pilot didn't get its turn.
+    if (e.infraError || e.decisions.some((d) => d.infraError)) {
       dropped++;
       continue;
     }
