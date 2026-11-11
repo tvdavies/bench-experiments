@@ -83,7 +83,18 @@ bun run lander --model gpt-6.1-sol --reasoning-effort low --clock tokens --ms-pe
 
 # HTML report across all runs (latest result wins per agent/clock/scenario)
 bun run lander:report
+
+# Standalone results site from run folders labelled v1 (one self-contained index.html)
+bun run lander:site            # -> results/lander/site/public/index.html
+bun run lander:site --match v2 # a different run label
 ```
+
+The site (`site/index.html`, `site/styles.css`, `site/app.js`, built by
+`src/site.ts`) has a leaderboard with paused, live and thinking-tax columns,
+two charts (paused vs live, verbosity vs live), small multiples of every
+flight per scenario (path, altitude or vertical speed, with linked
+highlighting), and a replay theatre for up to four flights. The output is a
+static `public/` folder, so it deploys as-is to myslop apps or any static host.
 
 Output goes to `results/lander/<runId>/`. That folder holds `config.json`,
 `summary.json`, and `episodes.jsonl` with full traces: every observation,

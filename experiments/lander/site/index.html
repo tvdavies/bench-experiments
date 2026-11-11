@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lander Bench</title>
+<meta name="description" content="Can a language model land a spacecraft when the world won't wait for it to think?">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='10' y='8' width='12' height='9' rx='2' fill='%23eb6834'/%3E%3Cpath d='M11 17l-3 6M21 17l3 6' stroke='%23eb6834' stroke-width='2'/%3E%3Cpath d='M14 18h4l-2 8z' fill='%23eda100'/%3E%3C/svg%3E">
+<style>/*__STYLES__*/</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"></span>Lander Bench</a>
+    <nav aria-label="Sections">
+      <a href="#results">Results</a>
+      <a href="#flights">Flights</a>
+      <a href="#replay">Replay</a>
+      <a href="#method">Method</a>
+    </nav>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero wrap">
+    <p class="eyebrow">An LLM benchmark where thinking costs time</p>
+    <h1>Can a model land a spacecraft when the world won't wait for it to think?</h1>
+    <p class="lede">Each model flies a small lander through gusty wind onto a pad. We fly every scenario twice. <b>Paused</b>: the world freezes while the model reasons. <b>Live</b>: every output token burns <span data-fill="msPerToken"></span> ms of flight time while the previous command keeps running. The gap between the two is the <b>thinking tax</b>.</p>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section class="band" id="results">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <h2>Results</h2>
+          <p class="sub">Mean score out of 100 across seeded scenarios. A safe landing scores 70 or more; crashes earn partial credit for how close they came.</p>
+        </div>
+        <div class="seg" role="radiogroup" aria-label="Scenario set" data-control="set">
+          <button type="button" data-value="standard" aria-pressed="true">Windy</button>
+          <button type="button" data-value="twist" aria-pressed="false">Engine failure</button>
+          <button type="button" data-value="all" aria-pressed="false">Both</button>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="table-scroll">
+          <table class="board" id="board"></table>
+        </div>
+      </div>
+      <div class="grid-2">
+        <figure class="card chart-card">
+          <figcaption><h3>Can it fly, and can it fly in time?</h3><p>Paused score vs live score. Points on the diagonal pay no thinking tax.</p></figcaption>
+          <div class="chart" id="chart-scatter"></div>
+        </figure>
+        <figure class="card chart-card">
+          <figcaption><h3>Verbosity vs live score</h3><p>Output tokens per decision (log scale), including hidden reasoning.</p></figcaption>
+          <div class="chart" id="chart-verbosity"></div>
+        </figure>
+      </div>
+      <div class="legend-row" id="legend-results"></div>
+    </div>
+  </section>
+
+  <section class="band alt" id="flights">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <h2>Every flight</h2>
+          <p class="sub">All models on the same scenario, overlaid. Hover a line or a legend entry to pick out one model; click a legend entry to hide it.</p>
+        </div>
+        <div class="controls">
+          <div class="seg" role="radiogroup" aria-label="Scenario set" data-control="fset">
+            <button type="button" data-value="standard" aria-pressed="true">Windy</button>
+            <button type="button" data-value="twist" aria-pressed="false">Engine failure</button>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="Clock" data-control="clock">
+            <button type="button" data-value="paused" aria-pressed="true">Paused</button>
+            <button type="button" data-value="tokens" aria-pressed="false">Live</button>
+          </div>
+          <div class="seg" role="radiogroup" aria-label="View" data-control="view">
+            <button type="button" data-value="path" aria-pressed="true">Path</button>
+            <button type="button" data-value="alt" aria-pressed="false">Altitude</button>
+            <button type="button" data-value="vy" aria-pressed="false">Vertical speed</button>
+          </div>
+        </div>
+      </div>
+      <div class="legend-row interactive" id="legend-flights"></div>
+      <div class="multiples" id="multiples"></div>
+    </div>
+  </section>
+
+  <section class="band" id="replay">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <h2>Replay</h2>
+          <p class="sub">Watch up to four flights of one scenario side by side. Hatched lanes show time spent thinking while the old command kept firing.</p>
+        </div>
+      </div>
+      <div class="card theater">
+        <div class="theater-controls">
+          <label class="field"><span>Scenario</span><select id="rp-scenario"></select></label>
+          <div class="flight-chips" id="rp-chips"></div>
+          <label class="field add"><span class="sr">Add flight</span><select id="rp-add"></select></label>
+        </div>
+        <div class="theater-body">
+          <div class="stage">
+            <svg id="rp-scene" class="scene" viewBox="0 0 800 420" role="img" aria-label="Lander replay"></svg>
+            <div class="transport">
+              <button type="button" id="rp-play" class="play" aria-label="Play">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path class="i-play" d="M4 2.5v11l9-5.5z"/><path class="i-pause" d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>
+              </button>
+              <input type="range" id="rp-scrub" min="0" max="1000" value="0" step="1" aria-label="Replay position">
+              <span class="clock-readout" id="rp-time">0.0 s</span>
+              <div class="seg small" role="radiogroup" aria-label="Playback speed" data-control="speed">
+                <button type="button" data-value="1" aria-pressed="false">1×</button>
+                <button type="button" data-value="2" aria-pressed="false">2×</button>
+                <button type="button" data-value="4" aria-pressed="true">4×</button>
+                <button type="button" data-value="8" aria-pressed="false">8×</button>
+              </div>
+            </div>
+            <svg id="rp-lanes" class="lanes" role="img" aria-label="Thinking timeline"></svg>
+          </div>
+          <aside class="side">
+            <div class="flight-cards" id="rp-cards"></div>
+            <div class="log-wrap">
+              <div class="log-head"><span id="rp-log-title">Decisions</span><span class="muted">click a row to jump</span></div>
+              <ol class="log" id="rp-log"></ol>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band alt" id="method">
+    <div class="wrap">
+      <div class="section-head"><div><h2>Method</h2><p class="sub">Small, deterministic and provider-neutral. Code: <a href="https://github.com/tvdavies/bench-experiments/tree/main/experiments/lander">tvdavies/bench-experiments</a>.</p></div></div>
+      <div class="method-grid">
+        <article class="card prose">
+          <h3>The sim</h3>
+          <p>A 2D point-mass lander. Gravity 1.6–3.7 m/s², a main engine giving up to 2g, lateral thrusters giving ±1.5 m/s², and 45 units of fuel. Wind is a random process with gusts and a noisy wind reading. A safe landing needs |vy| ≤ 2, |vx| ≤ 1 and to be within 15 m of the pad. Every agent on a seed faces the same air.</p>
+        </article>
+        <article class="card prose">
+          <h3>The clocks</h3>
+          <p><b>Paused</b>: the world waits, and each command is held for <span data-fill="hold"></span> s. <b>Live</b>: each output token, reasoning included, costs <span data-fill="msPerToken"></span> ms (about <span data-fill="tokPerSec"></span> tokens per second), and the previous command keeps running meanwhile. Models are told the rule and how long their last decision took. They are never told to be brief.</p>
+        </article>
+        <article class="card prose">
+          <h3>Engine failure</h3>
+          <p>In the engine-failure set the main engine silently drops to 75% thrust partway down. The model isn't told. A controller that trusts the spec sheet crashes almost every time, while an adaptive one survives about half. Descending slowly isn't a free fix either, because the fuel runs out.</p>
+        </article>
+        <article class="card prose">
+          <h3>Scoring</h3>
+          <p>A safe landing on the pad scores 70, plus up to 15 for fuel left and up to 15 for centring. Any other touchdown scores up to 50, decaying with how far outside the limits it was. A timeout scores 0. Episodes where the model API failed are dropped and not scored.</p>
+        </article>
+        <article class="card prose">
+          <h3>Baselines</h3>
+          <p>A 20-line P controller and a PI controller see the same telemetry at the same command rate and decide instantly. <b>Do nothing</b> is the floor. If a model can't beat the PI controller, it isn't flying well.</p>
+        </article>
+        <article class="card prose">
+          <h3>Caveats</h3>
+          <p id="caveats">Five seeds per set, so treat small gaps as noise. Models are reached through one gateway with default settings. Jev only answers multiple-choice questions, so it picks throttle levels from five options and makes no predictions. Fable 5.2 could not be reached through the gateway and is missing.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap footer"><span id="generated"></span></footer>
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>/*__APP__*/</script>
+</body>
+</html>

@@ -2,12 +2,16 @@
   "name": "bench-experiments",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*", "experiments/*"],
+  "workspaces": [
+    "packages/*",
+    "experiments/*"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
     "lander": "bun experiments/lander/src/cli.ts",
-    "lander:report": "bun experiments/lander/src/report.ts"
+    "lander:report": "bun experiments/lander/src/report.ts",
+    "lander:site": "bun experiments/lander/src/site.ts"
   },
   "devDependencies": {
     "@types/bun": "1.3.6",
